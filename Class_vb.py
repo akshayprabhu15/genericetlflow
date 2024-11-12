@@ -4,7 +4,7 @@
 # COMMAND ----------
 
 from pyspark.sql import DataFrame, SparkSession
-from pyspark.sql.functions import current_timestamp, lit,xxhash64,lower,col
+from pyspark.sql.functions import current_timestamp, lit,lower,col
 from delta.tables import DeltaTable
 from pyspark.sql.utils import AnalysisException
 import yaml  
@@ -54,16 +54,12 @@ class CSVToTable:
 
         """Writes the DataFrame to the Bronze table."""
         try:
-            hash_columns = [col(c) for c in df.columns]
-            df = df.withColumn("hash64",F.xxhash64(*hash_columns))
             df.write.mode("overwrite").saveAsTable(bronze_table_name)
             print(f"Data written to Bronze table '{bronze_table_name}' successfully.")
         except AnalysisException as e:
             print(f"Error writing to Bronze table: {e}")
 
     def write_silver_table(self, df: DataFrame):
-        hash_columns = [col(c) for c in df.columns]
-        df = df.withColumn("hash64",F.xxhash64(*hash_columns))
         load_strategy = self.load_strategy.lower()
         if load_strategy == "upsert":
             silver_df = df.withColumn("start_date", current_timestamp().cast("timestamp")) \
@@ -103,6 +99,7 @@ class CSVToTable:
         
         # Get the existing records from the Delta table
         existing_df = delta_table.toDF()
+        
         # Ensure that the primary keys are correctly set for the join
         join_condition = [df[col] == existing_df[col] for col in self.primary_keys]
 
