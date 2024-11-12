@@ -182,28 +182,3 @@ class CSVToTable:
         else:
             print("Data load strategy failed.")
 
-
-# COMMAND ----------
-
-s_df.display()
-
-# COMMAND ----------
-
-import pandas as pd
-
-
-data = {
-    'id': [1, 2, 3, 4, 5],
-    'department': ['IT', 'Sales', 'Marketing', 'KYC', 'Finance'],
-    'location': ['US', 'India', 'UK', 'England', 'Switzerland']
-}
-
-
-df = pd.DataFrame(data)
-
-# COMMAND ----------
-
-print("df columns:", df.columns)
-print("s_df columns:", s_df.columns)
-print("dup_check_cols:", dup_check_cols)
-
