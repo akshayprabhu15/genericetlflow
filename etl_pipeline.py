@@ -1,20 +1,66 @@
-import json
+from pyspark.sql.functions import col,current_timestamp,lit
+from pyspark.sql import SparkSession, DataFrame
 from delta.tables import DeltaTable
-import pyspark.sql.functions as F
+from pyspark.sql import functions as F
+import sys
+from pyspark.sql.utils import AnalysisException
+import json
+import csv
+import yaml
+import pandas as pd
 
 class Etl:
-    def __init__(self,spark, config_file):
-        self.spark = spark
-        with open(config_file, 'r') as file:
-            self.config = json.load(file)
+    def __init__(self,spark: SparkSession):
+        self.spark=spark
+        self.bronze_table = []
+        self.load_strategy = []
+        self.read_path = []
+        self.file_type = []
+        self.tableName = []
+        self.business_keys = []
+        self.load_path_df = None
         
-        self.read_path = self.config["excel_file_path"]
-        self.bronze_table = self.config["bronze_table"]
-        self.file_type = self.config["file_type"]
-        self.load_strategy = self.config["load_strategy"]
-        self.tableName = self.config["tableName"]
-        self.business_keys = self.config["business_keys"]
+    
+    def load_config(self,file_path:str):
+        #Formated to take CSV and JSON Files
+        print("Loading Config Data")
+        if file_path.endswith('.csv'):
+            print("Loading csv file ")
+            self.config = pd.read_csv(file_path).to_dict(orient='records')
+        elif file_path.endswith('.json'):
+            print("Loading JSON file")
+            with open(file_path, 'r') as file:
+                self.config = json.load(file)
+        elif file_path.endswith('.yaml') or file_path.endswith('.yml'):
+            print("Loading YAML file")
+            with open(file_path, 'r') as file:
+                self.config = yaml.safe_load(file)
+        else:
+            raise ValueError("Unsupported file format")
 
+        
+        if file_path.endswith('.yaml') or file_path.endswith('.yml'):
+            self.bronze_table = self.config["table_name"]
+            self.read_path = self.config["path"]
+            self.file_type = self.config["file_type"]
+            self.load_strategy = self.config["load_strategy"]
+            self.business_keys = self.config["primary_keys"]
+        elif file_path.endswith('.csv'):
+            self.bronze_table = self.config["table_name"]
+            self.read_path = self.config["path"]
+            self.file_type = self.config["file_type"]
+            self.load_strategy = self.config["load_strategy"]
+            self.business_keys = self.config["primary_keys"]
+        elif file_path.endswith('.json'):
+            self.read_path = self.config["excel_file_path"]
+            self.bronze_table = self.config["bronze_table"]
+            self.file_type = self.config["file_type"]
+            self.load_strategy = self.config["load_strategy"]
+            self.tableName = self.config["tableName"]
+            self.business_keys = self.config["business_keys"]
+
+
+        
     def load_bronze(self):
         if self.file_type == "excel":
             sheetname = self.config.get("sheetname", [])
@@ -92,23 +138,85 @@ class Etl:
         .merge(source_df.alias("incoming"),merge_condition)\
         .whenMatchedUpdate(condition=update_condition, set={**update_set,"Updated_Date":F.current_timestamp()})\
         .whenNotMatchedInsert(values={**insert_values,"Created_Date":F.current_timestamp(),"Updated_Date":F.current_timestamp()}).execute()
+    
+    def insert_only(self, source_df, target_table_name, primary_keys):
+        """Inserts new records into the Silver table."""
+        delta_table = DeltaTable.forName(self.spark, target_table_name)
+        
+        # Get the existing records from the Delta table
+        existing_df = delta_table.toDF()
+        
+        # Ensure that the primary keys are correctly set for the join
+        join_condition = [source_df[col] == existing_df[col] for col in primary_keys]
+
+        # Filter out records that already exist in the Silver table
+        new_records_df = source_df.alias("source").join(
+            existing_df.alias("target"),
+            join_condition,
+            "left_anti"  # Keep only new records
+        )
+        
+        # Insert the new records into the Silver table
+        if new_records_df.count() > 0:
+            new_records_df = new_records_df.withColumn("Start_Date", current_timestamp())
+            new_records_df.write.mode("append").saveAsTable(target_table_name)
+            
+            print(f"Inserted {new_records_df.count()} new records into Silver table '{target_table_name}'.")
+        else:
+            print("No new records to insert into Silver table.")
+
 
     def load_silver(self):
-        for table, target_table_name in self.tableName.items():
-            source_df = self.spark.read.format("delta").table(f"bronze.{table}")
-            primary_keys = self.business_keys.get(table)
+        if self.file_type == "excel":
+            for table, target_table_name in self.tableName.items():
+                source_df = self.spark.read.format("delta").table(f"bronze.{table}")
+                primary_keys = self.business_keys.get(table)
+                if self.load_strategy == 'SCD-Type2':
+                    if not self.spark.catalog.tableExists(target_table_name):
+                        print(target_table_name)
+                        #source_df = spark.read.format("delta").table(f"bronze.{table}")
+
+                        source_df = source_df.withColumn("Start_Date", F.current_date()).withColumn("End_Date", F.lit('null')).withColumn("IsCurrent", F.lit(1)).withColumn("JobRun",F.current_timestamp())
+                        source_df.write.format("delta").option("mergeSchema", "true").mode("overwrite").saveAsTable(target_table_name)
+                    else:    
+                        self.scd_type2(source_df, target_table_name, primary_keys)
+                elif self.load_strategy == 'Upsert':
+                    if not self.spark.catalog.tableExists(target_table_name):
+                        source_df = self.spark.read.format("delta").table(f"bronze.{table}").withColumn("Created_Date", F.current_timestamp()).withColumn("Updated_Date", F.current_timestamp())
+                        source_df.write.format("delta").mode("overwrite").option("mergeSchema", "true").saveAsTable(target_table_name)
+                    else:    
+                        self.upsert(source_df, target_table_name, primary_keys)
+                elif self.load_strategy == 'Insertsonly':
+                    if not self.spark.catalog.tableExists(target_table_name):
+                        source_df = self.spark.read.format("delta").table(f"bronze.{table}").withColumn("Created_Date", F.current_timestamp())
+                        source_df.write.format("delta").mode("overwrite").option("mergeSchema", "true").saveAsTable(target_table_name)
+                    else:    
+                        self.insert_only(source_df, target_table_name, primary_keys)
+        elif self.file_type == "csv":
+            target_table_name = "silver." + self.bronze_table
+            b_table_name = "bronze." + self.bronze_table 
+            bronze_table = DeltaTable.forName(self.spark, b_table_name)
+            source_df = bronze_table.toDF()
+            primary_keys = self.business_keys
             if self.load_strategy == 'SCD-Type2':
                 if not self.spark.catalog.tableExists(target_table_name):
                     print(target_table_name)
                     #source_df = spark.read.format("delta").table(f"bronze.{table}")
-
                     source_df = source_df.withColumn("Start_Date", F.current_date()).withColumn("End_Date", F.lit('null')).withColumn("IsCurrent", F.lit(1)).withColumn("JobRun",F.current_timestamp())
                     source_df.write.format("delta").option("mergeSchema", "true").mode("overwrite").saveAsTable(target_table_name)
                 else:    
                     self.scd_type2(source_df, target_table_name, primary_keys)
             elif self.load_strategy == 'Upsert':
                 if not self.spark.catalog.tableExists(target_table_name):
-                    source_df = self.spark.read.format("delta").table(f"bronze.{table}").withColumn("Created_Date", F.current_timestamp()).withColumn("Updated_Date", F.current_timestamp())
+                    #source_df = self.spark.read.format("delta").table(f"bronze.{table}").withColumn("Created_Date", F.current_timestamp()).withColumn("Updated_Date", F.current_timestamp())
                     source_df.write.format("delta").mode("overwrite").option("mergeSchema", "true").saveAsTable(target_table_name)
                 else:    
                     self.upsert(source_df, target_table_name, primary_keys)
+            elif self.load_strategy == 'Insertsonly':
+                if not self.spark.catalog.tableExists(target_table_name):
+                    source_df = source_df.withColumn("Start_Date", F.current_timestamp())
+                    source_df.write.format("delta").mode("overwrite").saveAsTable(target_table_name)
+                else:    
+                    self.insert_only(source_df, target_table_name, primary_keys)
+
+                    
