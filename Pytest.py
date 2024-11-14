@@ -59,7 +59,7 @@ class DataValidator(Etl):
         return 
 
     
-    def DuplicateTable(self, df: DataFrame, s_df) -> None:
+    def DuplicateTable(self, df: DataFrame, s_df,s_table_name) -> None:
         
         # Load the existing silver table DataFrame
         #s_df = self.spark.table(s_table_name)
@@ -75,8 +75,8 @@ class DataValidator(Etl):
         source_df = df.subtract(dup_df)
         # If the number of matching rows equals the number of rows in df, print and raise an error
         if source_df.count() == 0 : 
-            print("The new DataFrame contains duplicate entries from the existing table.")
-            raise ValueError("The new DataFrame contains duplicate entries from the existing table.")
+            print("The new DataFrame contains duplicate entries from the {s_table_name} table.")
+            raise ValueError("The new DataFrame contains duplicate entries from the {s_table_name} table.")
         else:
             print("The new DataFrame does not contain duplicate entries from the existing table.")
 
@@ -170,12 +170,14 @@ class DataValidator(Etl):
             #Check if its csv
             elif ftype == "csv":
                 print("Loading CSV File")
-                #for (tb , val ) in zip(self.bronze_table,self.read_path):
                 s_table_name = f"silver.{tb}"
                 if self.spark.catalog.tableExists(s_table_name):
                     s_df = self.spark.table(s_table_name)
                     self.path_data(val)
-                    self.DuplicateTable(self.load_path_df,s_df)
+                    try:
+                        self.DuplicateTable(self.load_path_df,s_df,s_table_name)
+                    except ValueError:
+                        continue
                     self.relicatebtable(tb)
 
     def checkdir(self):
