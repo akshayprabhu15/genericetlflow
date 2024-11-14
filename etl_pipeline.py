@@ -2,7 +2,7 @@ from pyspark.sql.functions import col,current_timestamp,lit
 from pyspark.sql import SparkSession, DataFrame
 from delta.tables import DeltaTable
 from pyspark.sql import functions as F
-from pyspark.sql.types import ArrayType, StructType, StructField, StringType
+from pyspark.sql.types import ArrayType, StructType, StructField, StringType,IntegerType,DoubleType,BooleanType,TimestampType,MapType
 import sys
 from pyspark.sql.utils import AnalysisException
 import json
@@ -21,6 +21,12 @@ class Etl:
         self.tableName = []
         self.business_keys = []
         self.primary_keys = []
+        self.complex_schema =  self.default_schema()
+        self.multiline = False
+        self.header = False
+        self.trailing_whitespace = False
+        self.leading_whitespace = True
+        self.inferSchema = False
         self.load_path_df = None
      
     def load_config(self,file_path:str):
@@ -67,16 +73,76 @@ class Etl:
         print(f"File type: {self.file_type}")
         return self.file_type,self.bronze_table,self.read_path,self.load_strategy,self.primary_keys
     
+    def default_schema(self):
+        """
+        Return a default schema. If no schema is provided, this will be used.
+        """
+        return StructType([
+            StructField("id", IntegerType(), True),
+            StructField("user_id", IntegerType(), True),
+            StructField("username", StringType(), True),
+            StructField("signup_date", TimestampType(), True),
+            StructField("is_active", BooleanType(), True),
+            StructField("purchases", ArrayType(DoubleType()), True),
+            StructField("preferences", MapType(StringType(), StringType()), True),
+            StructField("address", StructType([  # Nested struct (address info)
+                StructField("street", StringType(), True),
+                StructField("city", StringType(), True),
+                StructField("postal_code", StringType(), True)
+            ]), True),
+            StructField("description", StringType(), True)
+        ])
+
+
     def path_data(self,val):
-        #Check if its csv  
         if val.endswith('.csv'):
+            with open(val, 'r', encoding='utf-8') as file:
+                reader = csv.reader(file)
+        
+                # Read the first row to check if it could be a header
+                first_row = next(reader, None)
+        
+                # If there's a first row and it's not empty, assume it's a header
+                if first_row and all(isinstance(x, str) for x in first_row):
+                    self.header = True
+        
+                # Now, check for multiline rows and trailing whitespaces
+                for row in reader:
+                    for field in row:
+                        # Check if any field contains newline characters (indicating multiline content)
+                        if '\n' in field or '\r' in field:
+                            self.multiline = True
+                
+                        # Check for Leading whitespace
+                        if isinstance(field, str) and field != field.lstrip():
+                            self.leading_whitespace = True
+                
+                        # Check for trailing whitespace
+                        if isinstance(field, str) and field != field.rstrip():
+                            self.trailing_whitespace = True
+                
+                    if  self.multiline:  # If multiline is detected, exit early
+                        break
+        
+                # After checking for multiline and whitespace, load the CSV with Spark
+                df = self.spark.read.format('csv')\
+                    .option('header', self.header)\
+                        .option('multiline', self.multiline)\
+                            .option('ignoreLeadingWhiteSpace',self.leading_whitespace)\
+                                .option('ignoreTrailingWhiteSpace',self.trailing_whitespace).load(val)
+        
+                # Compare inferred schema with predefined complex schema
+                if df.schema == self.complex_schema:
+                    self.inferSchema = False  # The schema matches, no need to infer
+                else:
+                    self.inferSchema = True  # The schema does not match, infer schema
+            #Check if its csv  
             self.load_path_df = self.spark.read.format("csv") \
-                .option("header", "true") \
-                .option("inferSchema", "true") \
-                .option("escape", "\"") \
-                .option("multiLine", "true") \
-                .option("ignoreLeadingWhiteSpace", "true") \
-                .option("ignoreTrailingWhiteSpace", "true") \
+                .option("header", self.header) \
+                .option("inferSchema", self.inferSchema) \
+                .option("multiLine", self.multiline) \
+                .option("ignoreLeadingWhiteSpace", self.leading_whitespace) \
+                .option("ignoreTrailingWhiteSpace", self.trailing_whitespace) \
                 .load(val)
         return self.load_path_df
 
@@ -107,7 +173,8 @@ class Etl:
                     #Bronze Table Name
                     b_table_name = "bronze." + tb 
                     #Check if its csv
-                    self.path_data(val)
+                    
+                    self.load_path_df = self.spark.read.format("csv").option('header', True).load(val)
                     self.load_path_df.write.format("delta").mode("overwrite").saveAsTable(b_table_name)
         
 
@@ -223,11 +290,10 @@ class Etl:
                         else:    
                             self.insert_only(source_df, target_table_name, primary_keys)
             elif ftype == "csv":
-                for (i, p , l) in zip(self.bronze_table,self.primary_keys,self.load_strategy):
+                for (val, i, p , l) in zip(self.read_path,self.bronze_table,self.primary_keys,self.load_strategy):
                 #Get Bronze Table Name
-                    b_table_name = "bronze." + i 
-                    bronze_table = DeltaTable.forName(self.spark, b_table_name)
-                    source_df = bronze_table.toDF()
+                    self.path_data(val)
+                    source_df = self.load_path_df
                     target_table_name = "silver." + i
                     if l == 'SCD-Type2':
                         if not self.spark.catalog.tableExists(target_table_name):

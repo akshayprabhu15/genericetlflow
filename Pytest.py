@@ -3,11 +3,14 @@ from pyspark.sql import functions as F
 from pyspark.sql.functions import col
 import pytest
 from pyspark.sql.utils import AnalysisException
+from pyspark.sql.types import StructType, StructField, IntegerType, StringType, DoubleType, BooleanType, ArrayType, MapType, TimestampType
 from pyspark.sql import SparkSession
 import os
+import csv
 from datetime import date
 import datetime,calendar
 from etl_pipeline import Etl
+
 
 class DataValidator(Etl):
     def __init__(self, spark: SparkSession):
@@ -21,10 +24,17 @@ class DataValidator(Etl):
         self.year = datetime.datetime.today().year
         self.month= calendar.month_name[datetime.datetime.today().month]
         self.t_name = None
+        self.complex_schema =  self.default_schema()
+        self.multiline = False
+        self.header = False
+        self.trailing_whitespace = False
+        self.leading_whitespace = True
+        self.inferSchema = False
         
     def load_config(self, config_file_path: str):
         # Call the parent class load_config method
         return super().load_config(config_file_path)
+    
     
     def validate_dataframe(self, df: DataFrame, primarykeys: list):
         """Check if required columns exist, check for null values, and check for unique primary key values for a composite key."""
