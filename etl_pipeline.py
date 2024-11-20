@@ -9,6 +9,7 @@ import json
 import csv
 import yaml
 import pandas as pd
+from Functions import *
 
 
 
@@ -72,8 +73,6 @@ class Etl:
         print(f"Primary Key: {self.primary_keys}")
         print(f"File type: {self.file_type}")
         return self.file_type,self.bronze_table,self.read_path,self.load_strategy,self.primary_keys
-
-
 
     def path_data(self,val):
         if val.endswith('.csv'):
@@ -314,85 +313,13 @@ class Etl:
         return self.load_path_df
 
 
-
-
     def cast_dtpes(self):
-        for column in self.load_path_df.columns:
-            column_type = self.load_path_df.schema[column].dataType
-            # Check if the column is of StringType
-            if isinstance(column_type, StringType):
-                # Check if the column is an array in string form and cast it to ArrayType
-                if self.load_path_df.filter(F.col(column).rlike(r'^\[.*\]$')).count() > 0:
-                    self.load_path_df = self.load_path_df.withColumn(column,F.explode(F.from_json(F.col(column), ArrayType(StringType()))))
-
-                # Check if it's a valid integer string and cast it to IntegerType
-                elif self.load_path_df.filter(F.col(column).rlike(r'^[+-]?\d+$')).count() > 0:
-                    df = self.load_path_df.withColumn(
-                        column,
-                        F.when(
-                            # Check for Short range: ShortType range is from -2^15 to 2^15-1
-                            (F.col(column).cast("long") >= -2**15) & (F.col(column).cast("long") <= 2**15 - 1),
-                            F.col(column).cast(ShortType())  # Cast to ShortType if in range
-                        )
-                        .otherwise(
-                            F.when(
-                                # Check for Integer range: IntegerType range is from -2^31 to 2^31-1
-                                (F.col(column).cast("long") >= -2**31) & (F.col(column).cast("long") <= 2**31 - 1),
-                                F.col(column).cast(IntegerType())  # Cast to IntegerType if in range
-                            )
-                            .otherwise(F.col(column).cast(LongType()))  # Cast to LongType for larger numbers
-                        )
-                    )
-                # Check if it's a valid float or double string and cast it to DoubleType
-                elif self.load_path_df.filter(F.col(column).rlike(r'^[+-]?\d*\.\d+$')).count() > 0:
-                    self.load_path_df = self.load_path_df.withColumn(column, F.col(column).cast(DoubleType()))  # Cast to DoubleType for float/double values
-
-                elif self.load_path_df.filter(F.col(column).rlike(r'^\d{4}-\d{2}-\d{2}$')).count() > 0:
-                    self.load_path_df = self.load_path_df.withColumn(
-                        column, 
-                        F.when(
-                        F.col(column).rlike(r'^\d{4}-\d{2}-\d{2}$'),  # Check if the value matches the date pattern
-                        F.to_date(F.col(column), "yyyy-MM-dd")  # Cast to DateType
-                        ).otherwise(F.lit(None)))
-                    
-                elif self.load_path_df.filter(F.col(column).rlike(r'^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$')).count() > 0:
-                    self.load_path_df = self.load_path_df.withColumn(
-                        column, 
-                        F.when(
-                            F.col(column).rlike(r'^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$'),  # Check if the value matches timestamp pattern
-                            F.to_timestamp(F.col(column), "yyyy-MM-dd HH:mm:ss")  # Cast to TimestampType
-                            )
-                        .otherwise(F.lit(None))  # If it's not a valid date or timestamp, set it to null
-                        )
-
-
-                # Check if the column is an array in string form and cast it to MapType
-                elif self.load_path_df.filter(F.col(column).rlike(r'^\{.*\}$')).count() > 0:
-                    # Step 1: Parse the column into a MapType
-                    self.load_path_df = self.load_path_df.withColumn(
-                        column, 
-                        F.from_json(F.col(column), MapType(StringType(), StringType()))
-                        )
-
-                    # Step 2: Dynamically extract keys from the map and create new columns
-                    # Exploding the map to get the distinct keys
-                    keys = self.load_path_df.select(F.explode(F.map_keys(F.col(column)))).distinct().rdd.flatMap(lambda x: x).collect()
-
-                    # Step 3: For each key, create a new column in the DataFrame
-                    for key in keys:
-                        self.load_path_df = self.load_path_df.withColumn(
-                                key, 
-                                (F.col(column)).getItem(F.lit(key))
-                            )
-
-                    # Optionally, drop the original map column if you no longer need it
-                    self.load_path_df = self.load_path_df.drop(column)
-
-                # Otherwise, keep it as StringType (non-numeric strings will remain as-is)
-                else:
-                    self.load_path_df = self.load_path_df.withColumn(column, F.col(column))
-        return self.load_path_df     
-        
+        self.load_path_df = cast_string_array_map(self.load_path_df)
+        self.load_path_df = explode_map(self.load_path_df)
+        self.load_path_df = cast_to_short_int_long(self.load_path_df)
+        self.load_path_df = cast_date_type(self.load_path_df)
+        self.load_path_df = cast_timestamp_type(self.load_path_df)  
+        return self.load_path_df
         
     
 
